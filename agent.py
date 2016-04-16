@@ -4,27 +4,31 @@
 import libvirt
 import pyudev
 from xml.etree import ElementTree
+import json
 
 libvirt_conn = libvirt.open()
 hub_domains = {}
 
 
-def get_usb_hostdev_xml(dev_node):
+def get_usb_hostdev_xml(device):
     hostdev = ElementTree.Element('hostdev')
     hostdev.set('mode', 'subsystem')
     hostdev.set('type', 'usb')
+    hostdev.set('managed', 'yes')
     source = ElementTree.SubElement(hostdev, 'source')
-    source.set('dev', dev_node)
+    vendor = ElementTree.SubElement(source, 'vendor')
+    vendor.set('id', hex(int(device.attributes.get('idVendor'), 16)))
+    product = ElementTree.SubElement(source, 'product')
+    product.set('id', hex(int(device.attributes.get('idProduct'), 16)))
     return ElementTree.tostring(hostdev)
 
 
 def vm_attach_device(domain_name, device):
     domain = libvirt_conn.lookupByName(domain_name)
     if domain.isActive():
+        xml = get_usb_hostdev_xml(device)
         print('attaching {0} to {1}'.format(device.device_node, domain_name))
-        xml = get_usb_hostdev_xml(device.device_node)
         domain.attachDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_LIVE)
-        print(xml)
 
 
 def usb_device_callback(device):
@@ -32,7 +36,7 @@ def usb_device_callback(device):
         parent_device = device
         while True:
             parent_device = parent_device.find_parent('usb', 'usb_device')
-            if parent_device == None:
+            if parent_device is None:
                 break
             elif parent_device.device_path in hub_domains:
                 vm_attach_device(hub_domains[parent_device.device_path], device)
@@ -40,20 +44,18 @@ def usb_device_callback(device):
 
 
 def get_usb_device_paths(context, vendor_id, product_id):
-    device_paths = []
-    for device in context.list_devices(
-            subsystem='usb',
-            ID_VENDOR_ID=vendor_id,
-            ID_PRODUCT_ID=product_id
-    ):
-        device_paths.append(device.device_path)
-    return device_paths
+    return [device.device_path for device in context.list_devices(
+        subsystem='usb',
+        ID_VENDOR_ID=vendor_id,
+        ID_PRODUCT_ID=product_id)]
 
 
 def main():
     context = pyudev.Context()
-    for device_path in get_usb_device_paths(context, '05e3', '0608'):
-        hub_domains[device_path] = 'singapore'
+    with open('config.json', 'r') as config:
+        for k, v in json.load(config).items():
+            for device_path in get_usb_device_paths(context, v['idVendor'], v['idProduct']):
+                hub_domains[device_path] = k
     print(hub_domains)
     monitor = pyudev.Monitor.from_netlink(context)
     monitor.filter_by('usb', 'usb_device')
